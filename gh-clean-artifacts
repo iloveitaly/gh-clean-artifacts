@@ -1,0 +1,82 @@
+#!/usr/bin/env zsh
+# gh-trim-artifacts
+# Usage: gh trim-artifacts [-l <MB>] [-d <DAYS>]
+
+setopt err_exit pipefail
+
+# Default limits
+LIMIT_MB=400
+RETENTION_DAYS=7
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      echo "Usage: gh trim-artifacts [options]"
+      echo ""
+      echo "Options:"
+      echo "  -l, --limit <MB>   Set the storage limit in MB (default: 400)"
+      echo "  -d, --days <DAYS>  Minimum days to retain artifacts regardless of size (default: 7)"
+      echo "  -h, --help         Show this help message"
+      exit 0
+      ;;
+    -l|--limit)
+      LIMIT_MB="$2"
+      shift 2
+      ;;
+    -d|--days)
+      RETENTION_DAYS="$2"
+      shift 2
+      ;;
+    *)
+      echo "Error: Unknown option $1" >&2
+      echo "Run 'gh trim-artifacts --help' for usage." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validate inputs are positive integers
+if ! [[ "$LIMIT_MB" =~ ^[0-9]+$ ]] || ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "Error: Limit and days must be positive integers." >&2
+  exit 1
+fi
+
+LIMIT_BYTES=$(( LIMIT_MB * 1024 * 1024 ))
+RETENTION_SECONDS=$(( RETENTION_DAYS * 86400 ))
+CURRENT_TIME=$(date +%s)
+
+echo "Fetching artifacts (Limit: ${LIMIT_MB}MB, Min Retention: ${RETENTION_DAYS} days)..."
+
+if (( ! $+commands[jq] )); then
+  echo "Error: jq is required but not installed." >&2
+  exit 1
+fi
+
+# Fetch all artifacts using :owner/:repo placeholders
+ARTIFACTS_JSON=$(gh api "/repos/:owner/:repo/actions/artifacts" --paginate --method GET)
+
+CURRENT_USAGE=0
+DELETED_COUNT=0
+
+# Notice the jq filter now grabs `fromdateiso8601` to output epoch seconds as the 4th column
+while IFS=$'\t' read -r id size created created_epoch name; do
+  NEW_USAGE=$(( CURRENT_USAGE + size ))
+  AGE_SECONDS=$(( CURRENT_TIME - created_epoch ))
+  
+  if (( AGE_SECONDS < RETENTION_SECONDS )); then
+    # Keep: Artifact is newer than the minimum retention period (Trumps size limit)
+    CURRENT_USAGE=$NEW_USAGE
+  elif (( NEW_USAGE <= LIMIT_BYTES )); then
+    # Keep: Artifact fits under the size limit
+    CURRENT_USAGE=$NEW_USAGE
+  else
+    # Delete: Artifact is older than retention period AND exceeds size limit
+    echo "Deleting $name (ID: $id, Size: $size bytes, Created: $created)..."
+    gh api --silent --method DELETE "/repos/:owner/:repo/actions/artifacts/$id"
+    (( DELETED_COUNT++ ))
+  fi
+done < <(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.expired == false) | [.id, .size_in_bytes, .created_at, (.created_at | fromdateiso8601), .name] | @tsv' | sort -k3 -r)
+
+echo "Cleanup complete. Deleted $DELETED_COUNT artifacts."
+echo "Estimated remaining usage: $(( CURRENT_USAGE / 1024 / 1024 )) MB"
