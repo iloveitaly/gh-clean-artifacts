@@ -1,77 +1,85 @@
-# gh-clean-artifacts
+# Manage GitHub Artifacts
 
-A GitHub CLI extension to trim GitHub Actions artifacts, helping you manage storage limits and costs.
-
-## Features
-
--   **Retention Policy**: Retains recent artifacts (default: 7 days) regardless of size.
--   **Size Limit**: Deletes older artifacts once the total size exceeds your specified limit (default: 400 MB).
--   **Safe Cleanup**: Processes artifacts from newest to oldest. Recent artifacts are always kept. Older artifacts are kept until the storage limit is reached, then the rest are deleted.
--   **Dry Run / Interactive**: Currently, it performs deletions immediately but prints detailed logs. (Consider adding a dry-run flag in future versions).
--   **Robust**: Written in Python, avoiding shell pipe issues and providing clear statistics.
+Managing GitHub Actions artifacts can be a pain. I realized I was hoarding gigabytes of old build logs and binaries I'd never look at again. It felt like digital clutter taking up mental space—and actual storage quota. So I wrote this extension. It keeps your recent artifacts safe while ruthlessly pruning the old stuff once you hit a size limit. Think of it as a garbage collector for your CI/CD pipeline.
 
 ## Installation
 
-This tool is designed to be used as a `gh` extension.
+You can install this directly as a GitHub CLI extension. It's the easiest way to get it running in your workflow.
 
 ```bash
 gh extension install <your-username>/gh-clean-artifacts
 ```
 
-Or run locally:
+If you prefer running it locally or hacking on it, `uv` is your best friend here.
 
 ```bash
-# Ensure it is executable
+# Make the script executable
 chmod +x gh-clean-artifacts
 
-# Run directly
-./gh-clean-artifacts --limit 100 --days 7
+# Run with uv
+uv run gh-clean-artifacts --help
 ```
 
 ## Usage
 
+The defaults are sane: keep 7 days of history, but cap the total size at 400MB. If you're running a lean operation, you might want to tighten that up.
+
 ```bash
-gh clean-artifacts [options]
+gh clean-artifacts --limit 100 --days 3
 ```
 
-### Options
+This tells the script: "Keep the last 3 days no matter what, but purge anything else if the total folder size exceeds 100MB."
 
-| Flag | Description | Default |
-| :--- | :--- | :--- |
-| `-l`, `--limit` | Storage limit in MB. Artifacts exceeding this (excluding recent ones) are deleted. | `400` |
-| `-d`, `--days` | Minimum retention period in days. Artifacts newer than this are **always** kept. | `7` |
-| `-h`, `--help` | Show help message. | |
+## Features
 
-### Examples
+*   **Smart Retention**: Always keeps your newest artifacts within the window you define (default is 7 days).
+*   **Size Capping**: Enforces a hard limit on total storage (default 400MB), deleting the oldest artifacts first once the safety window is passed.
+*   **GitHub CLI Native**: Integrates seamlessly as a `gh` extension, so you don't need to juggle API tokens manually.
+*   **Verbose Logging**: Prints detailed information about every artifact it keeps or deletes, so you have a complete audit trail of what happened.
 
-**Keep 500MB of artifacts, but always keep the last 14 days:**
+## ⚠️ Warning
 
-```bash
-gh clean-artifacts --limit 500 --days 14
-```
+**This tool deletes data permanently.**
 
-**Strict cleanup: Keep only 100MB, deleting everything else (even recent items):**
+There is no "undo" bin for GitHub Artifacts. Once this script runs, the artifacts exceeding your limits are gone. I highly recommend running with a generous `--limit` first to see how much space you are actually using before tightening the screws.
 
-```bash
-gh clean-artifacts --limit 100 --days 0
-```
+## Automation
 
-**Standard cleanup (400MB limit, 7 days retention):**
+Since the GitHub CLI is already baked into `ubuntu-latest` (and most other runners), you don't have to install anything extra. It's the perfect "set and forget" task. You can drop a workflow file like this into `.github/workflows/cleanup.yml`:
 
-```bash
-gh clean-artifacts
+```yaml
+name: Cleanup Artifacts
+on:
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Install the extension from the current directory
+          gh extension install .
+          
+          # Run it
+          gh clean-artifacts --limit 500 --days 7
 ```
 
 ## How it works
 
-1.  **Fetches** all artifacts for the current repository.
-2.  **Sorts** them by creation date (newest first).
-3.  **Iterates** through the list:
-    -   If an artifact is **newer** than `--days`, it is **kept**.
-    -   If the running total size is **under** `--limit`, it is **kept**.
-    -   Otherwise, it is **deleted**.
+The logic is strictly prioritized to save your most recent work while respecting your storage cap:
 
-## Requirements
+1.  **Retention Window**: Any artifact newer than `--days` (default: 7) is **kept**, period. Even if you have 10GB of artifacts from yesterday, they stay.
+2.  **Size Limit**: For artifacts *older* than the retention window, we keep them until the *total* size of all artifacts (new + old) hits the `--limit` (default: 400MB).
+3.  **Cleanup**: Once the limit is reached, the remaining older artifacts are deleted, starting from the oldest.
 
--   [GitHub CLI (`gh`)](https://cli.github.com/)
--   Python 3
+## [MIT License](LICENSE.md)

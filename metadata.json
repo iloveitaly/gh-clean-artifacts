@@ -1,0 +1,10 @@
+{
+  "name": "gh-clean-artifacts",
+  "description": "Prune GitHub Actions artifacts by age and total size to manage storage costs.",
+  "keywords": [
+    "github",
+    "artifacts",
+    "cleanup",
+    "devops"
+  ]
+}
