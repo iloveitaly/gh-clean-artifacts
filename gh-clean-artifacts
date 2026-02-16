@@ -1,82 +1,164 @@
-#!/usr/bin/env zsh
-# gh-trim-artifacts
-# Usage: gh trim-artifacts [-l <MB>] [-d <DAYS>]
+#!/usr/bin/env python3
+import argparse
+import subprocess
+import sys
+import datetime
+import time
 
-setopt err_exit pipefail
+def parse_args():
+    parser = argparse.ArgumentParser(description="Trim GitHub Actions artifacts.")
+    parser.add_argument("-l", "--limit", type=int, default=400, help="Storage limit in MB (default: 400)")
+    parser.add_argument("-d", "--days", type=int, default=7, help="Minimum days to retain artifacts (default: 7)")
+    return parser.parse_args()
 
-# Default limits
-LIMIT_MB=400
-RETENTION_DAYS=7
+def get_artifacts():
+    print("Fetching artifacts list...", file=sys.stderr)
+    # Fetch artifacts as TSV: id, size, created_at, name
+    # We use --paginate to get all pages
+    # We use --jq to extract fields and format as TSV
+    cmd = [
+        "gh", "api", 
+        "/repos/:owner/:repo/actions/artifacts", 
+        "--paginate", 
+        "--jq", ".artifacts[] | select(.expired == false) | [.id, .size_in_bytes, .created_at, .name] | @tsv"
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error fetching artifacts: {e}", file=sys.stderr)
+        print(f"Stderr: {e.stderr}", file=sys.stderr)
+        sys.exit(1)
 
-# Parse command-line arguments
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -h|--help)
-      echo "Usage: gh trim-artifacts [options]"
-      echo ""
-      echo "Options:"
-      echo "  -l, --limit <MB>   Set the storage limit in MB (default: 400)"
-      echo "  -d, --days <DAYS>  Minimum days to retain artifacts regardless of size (default: 7)"
-      echo "  -h, --help         Show this help message"
-      exit 0
-      ;;
-    -l|--limit)
-      LIMIT_MB="$2"
-      shift 2
-      ;;
-    -d|--days)
-      RETENTION_DAYS="$2"
-      shift 2
-      ;;
-    *)
-      echo "Error: Unknown option $1" >&2
-      echo "Run 'gh trim-artifacts --help' for usage." >&2
-      exit 1
-      ;;
-  esac
-done
+    artifacts = []
+    if not result.stdout.strip():
+        return artifacts
 
-# Validate inputs are positive integers
-if ! [[ "$LIMIT_MB" =~ ^[0-9]+$ ]] || ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
-  echo "Error: Limit and days must be positive integers." >&2
-  exit 1
-fi
+    for line in result.stdout.strip().split('\n'):
+        parts = line.split('\t')
+        if len(parts) < 4:
+            continue
+        
+        try:
+            art_id = parts[0]
+            size = int(parts[1])
+            created_str = parts[2]
+            name = parts[3]
+            
+            # Parse datetime
+            # created_at is like 2026-02-09T18:39:03Z
+            # We handle 'Z' manually for compatibility or use fromisoformat
+            if created_str.endswith('Z'):
+                created_str = created_str[:-1] + '+00:00'
+            created_dt = datetime.datetime.fromisoformat(created_str)
+            
+            artifacts.append({
+                'id': art_id,
+                'size': size,
+                'created_at': created_dt,
+                'name': name
+            })
+        except ValueError as e:
+            print(f"Warning: Failed to parse line '{line}': {e}", file=sys.stderr)
+            continue
+            
+    # Sort by created_at descending (newest first)
+    artifacts.sort(key=lambda x: x['created_at'], reverse=True)
+    return artifacts
 
-LIMIT_BYTES=$(( LIMIT_MB * 1024 * 1024 ))
-RETENTION_SECONDS=$(( RETENTION_DAYS * 86400 ))
-CURRENT_TIME=$(date +%s)
+def format_size(size_bytes):
+    if size_bytes == 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(units) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.2f} {units[i]}"
 
-echo "Fetching artifacts (Limit: ${LIMIT_MB}MB, Min Retention: ${RETENTION_DAYS} days)..."
+def get_current_repo():
+    cmd = ["gh", "repo", "view", "--json", "owner,name", "--jq", ".owner.login + \"/\" + .name"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return "Unknown (check gh context)"
 
-if (( ! $+commands[jq] )); then
-  echo "Error: jq is required but not installed." >&2
-  exit 1
-fi
+def delete_artifact(art_id, name, size, created_at):
+    print(f"Deleting {name} (ID: {art_id}, Size: {format_size(size)}, Created: {created_at})...")
+    cmd = [
+        "gh", "api", 
+        f"/repos/:owner/:repo/actions/artifacts/{art_id}", 
+        "--method", "DELETE", 
+        "--silent"
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error deleting artifact {art_id}: {e}", file=sys.stderr)
+        return False
 
-# Fetch all artifacts using :owner/:repo placeholders
-ARTIFACTS_JSON=$(gh api "/repos/:owner/:repo/actions/artifacts" --paginate --method GET)
+def main():
+    args = parse_args()
+    
+    current_repo = get_current_repo()
+    print(f"Target Repository: {current_repo}")
+    
+    limit_bytes = args.limit * 1024 * 1024
+    min_retention_days = args.days
+    
+    now = datetime.datetime.now(datetime.timezone.utc)
+    retention_cutoff = now - datetime.timedelta(days=min_retention_days)
+    
+    artifacts = get_artifacts()
+    
+    total_count = len(artifacts)
+    total_size = sum(a['size'] for a in artifacts)
+    
+    print(f"Total Artifacts: {total_count}")
+    print(f"Total Size: {format_size(total_size)}")
+    print(f"Limit: {args.limit} MB")
+    print(f"Retention Policy: Keep artifacts newer than {min_retention_days} days ({retention_cutoff.isoformat()})")
+    print("-" * 40)
 
-CURRENT_USAGE=0
-DELETED_COUNT=0
+    current_usage = 0
+    deleted_count = 0
+    retained_count = 0
+    
+    for art in artifacts:
+        # Check retention age
+        # art['created_at'] is offset-aware (UTC)
+        is_recent = art['created_at'] > retention_cutoff
+        
+        # We process newest first.
+        # If it's recent, we keep it.
+        # If it's old but we still have space, we keep it.
+        # Otherwise we delete it.
+        
+        if is_recent:
+            # Keep: Newer than retention period (Trumps size limit)
+            current_usage += art['size']
+            retained_count += 1
+            # Debug: print(f"Keeping {art['name']} (Recent)")
+        elif (current_usage + art['size']) <= limit_bytes:
+            # Keep: Fits in size limit
+            current_usage += art['size']
+            retained_count += 1
+            # Debug: print(f"Keeping {art['name']} (Fits in limit)")
+        else:
+            # Delete
+            if delete_artifact(art['id'], art['name'], art['size'], art['created_at']):
+                deleted_count += 1
+            else:
+                # If deletion fails, assume it remains
+                current_usage += art['size']
 
-# Notice the jq filter now grabs `fromdateiso8601` to output epoch seconds as the 4th column
-while IFS=$'\t' read -r id size created created_epoch name; do
-  NEW_USAGE=$(( CURRENT_USAGE + size ))
-  AGE_SECONDS=$(( CURRENT_TIME - created_epoch ))
-  
-  if (( AGE_SECONDS < RETENTION_SECONDS )); then
-    # Keep: Artifact is newer than the minimum retention period (Trumps size limit)
-    CURRENT_USAGE=$NEW_USAGE
-  elif (( NEW_USAGE <= LIMIT_BYTES )); then
-    # Keep: Artifact fits under the size limit
-    CURRENT_USAGE=$NEW_USAGE
-  else
-    # Delete: Artifact is older than retention period AND exceeds size limit
-    echo "Deleting $name (ID: $id, Size: $size bytes, Created: $created)..."
-    gh api --silent --method DELETE "/repos/:owner/:repo/actions/artifacts/$id"
-    (( DELETED_COUNT++ ))
-  fi
-done < <(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.expired == false) | [.id, .size_in_bytes, .created_at, (.created_at | fromdateiso8601), .name] | @tsv' | sort -k3 -r)
+    print("-" * 40)
+    print(f"Cleanup complete.")
+    print(f"Deleted: {deleted_count}")
+    print(f"Retained: {retained_count}")
+    print(f"Final Estimated Usage: {format_size(current_usage)}")
 
-echo "Cleanup complete. Deleted $DELETED_COUNT artifacts."
-echo "Estimated remaining usage: $(( CURRENT_USAGE / 1024 / 1024 )) MB"
+if __name__ == "__main__":
+    main()
