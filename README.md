@@ -67,8 +67,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Install the extension from the current directory
-          gh extension install .
+          # Install the extension
+          gh extension install iloveitaly/gh-clean-artifacts
           
           # Run it
           gh clean-artifacts --limit 500 --days 7
