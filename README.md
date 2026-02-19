@@ -82,4 +82,10 @@ The logic is strictly prioritized to save your most recent work while respecting
 2.  **Size Limit**: For artifacts *older* than the retention window, we keep them until the *total* size of all artifacts (new + old) hits the `--limit` (default: 400MB).
 3.  **Cleanup**: Once the limit is reached, the remaining older artifacts are deleted, starting from the oldest.
 
+## Related Projects
+
+* [github-action-nixpacks](https://github.com/iloveitaly/github-action-nixpacks): Build and push images with nixpacks
+* [playwright-trace-analyzer](https://github.com/iloveitaly/playwright-trace-analyzer): CLI tool for analyzing Playwright trace files without the browser-based viewer
+* [pytest-plugin-utils](https://github.com/iloveitaly/pytest-plugin-utils): Reusable configuration and artifact utilities for building pytest plugins
+
 ## [MIT License](LICENSE.md)
