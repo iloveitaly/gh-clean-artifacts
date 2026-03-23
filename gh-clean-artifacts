@@ -3,25 +3,41 @@ import argparse
 import subprocess
 import sys
 import datetime
-import time
+import os
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Trim GitHub Actions artifacts.")
     parser.add_argument("-l", "--limit", type=int, default=400, help="Storage limit in MB (default: 400)")
     parser.add_argument("-d", "--days", type=int, default=7, help="Minimum days to retain artifacts (default: 7)")
+    parser.add_argument("-R", "--repo", type=str, help="Target repository (owner/repo). Defaults to GITHUB_REPOSITORY env var or current repo context.")
     return parser.parse_args()
 
-def get_artifacts():
+def get_target_repo(repo_arg):
+    if repo_arg:
+        return repo_arg
+    
+    env_repo = os.environ.get("GITHUB_REPOSITORY")
+    if env_repo:
+        return env_repo
+
+    cmd = ["gh", "repo", "view", "--json", "owner,name", "--jq", ".owner.login + \"/\" + .name"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+def get_artifacts(repo):
     print("Fetching artifacts list...", file=sys.stderr)
-    # Fetch artifacts as TSV: id, size, created_at, name
-    # We use --paginate to get all pages
-    # We use --jq to extract fields and format as TSV
-    cmd = [
-        "gh", "api", 
+    cmd = ["gh", "api"]
+    if repo:
+        cmd.extend(["-R", repo])
+    
+    cmd.extend([
         "/repos/:owner/:repo/actions/artifacts", 
         "--paginate", 
         "--jq", ".artifacts[] | select(.expired == false) | [.id, .size_in_bytes, .created_at, .name] | @tsv"
-    ]
+    ])
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -45,9 +61,6 @@ def get_artifacts():
             created_str = parts[2]
             name = parts[3]
             
-            # Parse datetime
-            # created_at is like 2026-02-09T18:39:03Z
-            # We handle 'Z' manually for compatibility or use fromisoformat
             if created_str.endswith('Z'):
                 created_str = created_str[:-1] + '+00:00'
             created_dt = datetime.datetime.fromisoformat(created_str)
@@ -62,7 +75,6 @@ def get_artifacts():
             print(f"Warning: Failed to parse line '{line}': {e}", file=sys.stderr)
             continue
             
-    # Sort by created_at descending (newest first)
     artifacts.sort(key=lambda x: x['created_at'], reverse=True)
     return artifacts
 
@@ -76,22 +88,17 @@ def format_size(size_bytes):
         i += 1
     return f"{size_bytes:.2f} {units[i]}"
 
-def get_current_repo():
-    cmd = ["gh", "repo", "view", "--json", "owner,name", "--jq", ".owner.login + \"/\" + .name"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return result.stdout.strip()
-    except subprocess.CalledProcessError:
-        return "Unknown (check gh context)"
-
-def delete_artifact(art_id, name, size, created_at):
+def delete_artifact(repo, art_id, name, size, created_at):
     print(f"Deleting {name} (ID: {art_id}, Size: {format_size(size)}, Created: {created_at})...")
-    cmd = [
-        "gh", "api", 
+    cmd = ["gh", "api"]
+    if repo:
+        cmd.extend(["-R", repo])
+    
+    cmd.extend([
         f"/repos/:owner/:repo/actions/artifacts/{art_id}", 
         "--method", "DELETE", 
         "--silent"
-    ]
+    ])
     try:
         subprocess.run(cmd, check=True)
         return True
@@ -102,8 +109,12 @@ def delete_artifact(art_id, name, size, created_at):
 def main():
     args = parse_args()
     
-    current_repo = get_current_repo()
-    print(f"Target Repository: {current_repo}")
+    repo = get_target_repo(args.repo)
+    if not repo:
+        print("Error: Could not determine target repository. Use --repo or run in a repo context.", file=sys.stderr)
+        sys.exit(1)
+        
+    print(f"Target Repository: {repo}")
     
     limit_bytes = args.limit * 1024 * 1024
     min_retention_days = args.days
@@ -111,7 +122,7 @@ def main():
     now = datetime.datetime.now(datetime.timezone.utc)
     retention_cutoff = now - datetime.timedelta(days=min_retention_days)
     
-    artifacts = get_artifacts()
+    artifacts = get_artifacts(repo)
     
     total_count = len(artifacts)
     total_size = sum(a['size'] for a in artifacts)
@@ -127,31 +138,18 @@ def main():
     retained_count = 0
     
     for art in artifacts:
-        # Check retention age
-        # art['created_at'] is offset-aware (UTC)
         is_recent = art['created_at'] > retention_cutoff
         
-        # We process newest first.
-        # If it's recent, we keep it.
-        # If it's old but we still have space, we keep it.
-        # Otherwise we delete it.
-        
         if is_recent:
-            # Keep: Newer than retention period (Trumps size limit)
             current_usage += art['size']
             retained_count += 1
-            # Debug: print(f"Keeping {art['name']} (Recent)")
         elif (current_usage + art['size']) <= limit_bytes:
-            # Keep: Fits in size limit
             current_usage += art['size']
             retained_count += 1
-            # Debug: print(f"Keeping {art['name']} (Fits in limit)")
         else:
-            # Delete
-            if delete_artifact(art['id'], art['name'], art['size'], art['created_at']):
+            if delete_artifact(repo, art['id'], art['name'], art['size'], art['created_at']):
                 deleted_count += 1
             else:
-                # If deletion fails, assume it remains
                 current_usage += art['size']
 
     print("-" * 40)
