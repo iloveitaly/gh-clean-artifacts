@@ -41,7 +41,10 @@ Write or update the @README.md:
   * However, if specific rules below conflict with what is written, follow the rules below
 * Be concise, do not use too many adjectives
 * The title should be a short description of the project, not just the project name
-* Don't try to be too cute: no story telling and do not be overly salesly.
+* Don't try to be exciting or creative
+  * No story telling
+  * Do not be overly salesly.
+  * Omit phrases like "The tool is designed to be smart" which don't say anything useful
 * No emojis
 * Assume `uv` and omit pip examples
 * Include a single line at the end `## [MIT License](LICENSE.md)` (above any template attribution)
