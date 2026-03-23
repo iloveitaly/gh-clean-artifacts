@@ -45,7 +45,11 @@ There is no "undo" bin for GitHub Artifacts. Once this script runs, the artifact
 
 ## Automation
 
-Since the GitHub CLI is already baked into `ubuntu-latest` (and most other runners), you don't have to install anything extra. It's the perfect "set and forget" task. You can drop a workflow file like this into `.github/workflows/cleanup.yml`:
+Since the GitHub CLI is already baked into `ubuntu-latest` (and most other runners), you don't have to install anything extra. It's the perfect "set and forget" task. 
+
+The extension automatically detects your repository using the `GITHUB_REPOSITORY` environment variable provided by GitHub Actions, so **no checkout step is required**.
+
+You can drop a workflow file like this into `.github/workflows/cleanup.yml`:
 
 ```yaml
 name: Cleanup Artifacts
@@ -60,9 +64,6 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Run Cleanup
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,8 +71,11 @@ jobs:
           # Install the extension
           gh extension install iloveitaly/gh-clean-artifacts
           
-          # Run it
+          # Option 1: Automatic repository detection (recommended)
           gh clean-artifacts --limit 500 --days 7
+          
+          # Option 2: Explicit repository reference
+          # gh clean-artifacts --repo "${{ github.repository }}" --limit 500 --days 7
 ```
 
 ## How it works
