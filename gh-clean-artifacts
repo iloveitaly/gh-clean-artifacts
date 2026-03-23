@@ -29,15 +29,13 @@ def get_target_repo(repo_arg):
 
 def get_artifacts(repo):
     print("Fetching artifacts list...", file=sys.stderr)
-    cmd = ["gh", "api"]
-    if repo:
-        cmd.extend(["-R", repo])
-    
-    cmd.extend([
-        "/repos/:owner/:repo/actions/artifacts", 
-        "--paginate", 
+    endpoint = f"/repos/{repo}/actions/artifacts"
+    cmd = [
+        "gh", "api",
+        endpoint,
+        "--paginate",
         "--jq", ".artifacts[] | select(.expired == false) | [.id, .size_in_bytes, .created_at, .name] | @tsv"
-    ])
+    ]
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -90,15 +88,12 @@ def format_size(size_bytes):
 
 def delete_artifact(repo, art_id, name, size, created_at):
     print(f"Deleting {name} (ID: {art_id}, Size: {format_size(size)}, Created: {created_at})...")
-    cmd = ["gh", "api"]
-    if repo:
-        cmd.extend(["-R", repo])
-    
-    cmd.extend([
-        f"/repos/:owner/:repo/actions/artifacts/{art_id}", 
-        "--method", "DELETE", 
+    cmd = [
+        "gh", "api",
+        f"/repos/{repo}/actions/artifacts/{art_id}",
+        "--method", "DELETE",
         "--silent"
-    ])
+    ]
     try:
         subprocess.run(cmd, check=True)
         return True
